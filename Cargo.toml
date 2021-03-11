@@ -1,0 +1,17 @@
+[package]
+name = "embed"
+version = "0.1.0"
+description = "Embedded dictionary based on lmdb"
+authors = ["Hector Salazar <hecsalazarf@outlook.com>"]
+edition = "2018"
+
+[dependencies]
+uuid = { version = "0.8.2", features = ["v5"] }
+lmdb-rkv = { git = "https://github.com/hecsalazarf/lmdb-rs" }
+tokio = { version = "1.1.1", features = ["sync"] }
+serde = "1.0.123"
+bincode = "1.3.1"
+
+[dev-dependencies]
+tempfile = "3.2.0"
+tokio = { version = "1.1.1", features = ["rt", "macros", "time"] }
