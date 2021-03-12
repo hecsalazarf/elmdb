@@ -231,17 +231,16 @@ mod tests {
     assert_eq!(Ok(None), store.first(&tx));
     tx.abort();
 
-    let items: Vec<(&[u8], u16)> = vec![(b"Z", 10), (b"Y", 100), (b"X", 1000)];
+    let items: Vec<(&[u8], u16)> = vec![(b"W", 2000), (b"X", 1000), (b"Y", 10), (b"Z", 100)];
+    let mut tx = env.begin_rw_txn()?;
     for (key, value) in items.iter() {
-      let mut tx = env.begin_rw_txn()?;
       store.put(&mut tx, key, value)?;
-      tx.commit()?;
     }
+    tx.commit()?;
 
     let tx = env.begin_ro_txn()?;
-    assert_eq!(Ok(Some((&b"Z"[..], 10))), store.last(&tx));
-    let tx = tx.reset().renew()?;
-    assert_eq!(Ok(Some((&b"X"[..], 1000))), store.first(&tx));
+    assert_eq!(Ok(items.clone().into_iter().last()), store.last(&tx));
+    assert_eq!(Ok(items.clone().into_iter().nth(0)), store.first(&tx));
     Ok(())
   }
 }
