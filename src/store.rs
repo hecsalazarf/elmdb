@@ -70,7 +70,7 @@ impl<D> Store<D> {
     D: Deserialize<'txn>,
     T: Transaction,
   {
-    self.iter_from(txn, [0])?.take(1).next().transpose()
+    self.iter(txn)?.take(1).next().transpose()
   }
 
   /// Returns the last key and value in the Store, or None if the Store is empty.
@@ -82,6 +82,15 @@ impl<D> Store<D> {
     self.iter_end_backwards(txn)?.take(1).next().transpose()
   }
 
+  /// Returns an iterator over the whole database.
+  pub fn iter<'txn, T>(&self, txn: &'txn T) -> Result<StoreIter<'txn, D>>
+  where
+    T: Transaction,
+  {
+    let mut cursor = txn.open_ro_cursor(self.database)?;
+    Ok(StoreIter::new(cursor.iter_start()))
+  }
+
   /// Returns an iterator positioned at first key greater than or equal to the specified key.
   pub fn iter_from<'txn, K, T>(&self, txn: &'txn T, key: K) -> Result<StoreIter<'txn, D>>
   where
@@ -89,8 +98,7 @@ impl<D> Store<D> {
     T: Transaction,
   {
     let mut cursor = txn.open_ro_cursor(self.database)?;
-    let iter = cursor.iter_from(key);
-    Ok(StoreIter::new(iter))
+    Ok(StoreIter::new(cursor.iter_from(key)))
   }
 
   /// Returns an iterator over specified `range`.
@@ -101,8 +109,7 @@ impl<D> Store<D> {
     R: RangeBounds<K>,
   {
     let mut cursor = txn.open_ro_cursor(self.database)?;
-    let iter = cursor.iter_range(range);
-    Ok(StoreIter::new(iter))
+    Ok(StoreIter::new(cursor.iter_range(range)))
   }
 
   /// Returns an iterator positioned at the last key and iterating backwards.
@@ -111,8 +118,7 @@ impl<D> Store<D> {
     T: Transaction,
   {
     let mut cursor = txn.open_ro_cursor(self.database)?;
-    let iter = cursor.iter_end_backwards();
-    Ok(StoreIter::new(iter))
+    Ok(StoreIter::new(cursor.iter_end_backwards()))
   }
 }
 
@@ -180,18 +186,18 @@ mod tests {
     }
 
     let tx = env.begin_ro_txn()?;
+    assert_eq!(items.clone(), store.iter(&tx)?.collect::<Result<Vec<_>>>()?);
+
     assert_eq!(
       items.clone().into_iter().skip(1).collect::<Vec<_>>(),
       store.iter_from(&tx, b"2")?.collect::<Result<Vec<_>>>()?
     );
 
-    let tx = tx.reset().renew()?;
     assert_eq!(
       items.clone().into_iter().rev().collect::<Vec<_>>(),
       store.iter_end_backwards(&tx)?.collect::<Result<Vec<_>>>()?
     );
 
-    let tx = tx.reset().renew()?;
     assert_eq!(
       items
         .clone()
