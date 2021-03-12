@@ -3,7 +3,7 @@ use lmdb::{
   Cursor, Database, Environment, Error, Iter, Result, RwTransaction, Transaction, WriteFlags,
 };
 use serde::{Deserialize, Serialize};
-use std::marker::PhantomData;
+use std::{marker::PhantomData, ops::RangeBounds};
 
 /// A typed key-value LMDB database.
 #[derive(Copy, Clone, Debug)]
@@ -93,6 +93,18 @@ impl<D> Store<D> {
     Ok(StoreIter::new(iter))
   }
 
+  /// Returns an iterator over specified `range`.
+  pub fn range<'txn, T, K, R>(&self, txn: &'txn T, range: R) -> Result<StoreIter<'txn, D>>
+  where
+    T: Transaction,
+    K: AsRef<[u8]>,
+    R: RangeBounds<K>,
+  {
+    let mut cursor = txn.open_ro_cursor(self.database)?;
+    let iter = cursor.iter_range(range);
+    Ok(StoreIter::new(iter))
+  }
+
   /// Returns an iterator positioned at the last key and iterating backwards.
   pub fn iter_end_backwards<'txn, T>(&self, txn: &'txn T) -> Result<StoreIter<'txn, D>>
   where
@@ -160,7 +172,7 @@ mod tests {
   fn iterators() -> Result<()> {
     let (_tmpdir, env) = create_env()?;
     let store = Store::open(&env, "mystore")?;
-    let items: Vec<(&[u8], u16)> = vec![(b"0", 10), (b"1", 100), (b"2", 1000)];
+    let items: Vec<(&[u8], u16)> = vec![(b"1", 1000), (b"2", 2000), (b"3", 3000), (b"5", 4000)];
     for (key, value) in items.iter() {
       let mut tx = env.begin_rw_txn()?;
       store.put(&mut tx, key, value)?;
@@ -168,12 +180,29 @@ mod tests {
     }
 
     let tx = env.begin_ro_txn()?;
-    let iter = store.iter_from(&tx, [0])?;
-    assert_eq!(items, iter.collect::<Result<Vec<_>>>()?);
+    assert_eq!(
+      items.clone().into_iter().skip(1).collect::<Vec<_>>(),
+      store.iter_from(&tx, b"2")?.collect::<Result<Vec<_>>>()?
+    );
+
     let tx = tx.reset().renew()?;
-    let iter_back = store.iter_end_backwards(&tx)?;
-    let back_items: Vec<_> = items.into_iter().rev().collect();
-    assert_eq!(back_items, iter_back.collect::<Result<Vec<_>>>()?);
+    assert_eq!(
+      items.clone().into_iter().rev().collect::<Vec<_>>(),
+      store.iter_end_backwards(&tx)?.collect::<Result<Vec<_>>>()?
+    );
+
+    let tx = tx.reset().renew()?;
+    assert_eq!(
+      items
+        .clone()
+        .into_iter()
+        .skip(1)
+        .take(2)
+        .collect::<Vec<_>>(),
+      store
+        .range(&tx, &b"2"[..]..=b"3")?
+        .collect::<Result<Vec<_>>>()?
+    );
     Ok(())
   }
 
