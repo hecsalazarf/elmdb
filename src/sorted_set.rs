@@ -71,7 +71,11 @@ impl SortedSet {
 
     let (start, end) = self.to_bytes_range(range);
     let mut cursor = txn.open_ro_cursor(self.skiplist)?;
-    let iter = cursor.iter_from(start);
+    // We use Bound::Unbounded as the upper bound in the cursor iterator
+    // because the element's value is at the end of the skiplist's key. That means
+    // a longer key than the expected bound which would lead to wrong comparisons.
+    // The upper limit is filtered within the own SortedRange implementation
+    let iter = cursor.iter_range((start, Bound::Unbounded));
     let has_uuid = self.uuid.is_some();
 
     Ok(SortedRange {
@@ -161,37 +165,24 @@ impl SortedSet {
       .unwrap_or(Vec::new())
   }
 
-  fn to_bytes_range<R>(&self, range: R) -> (BoundLimit, Bound<BoundLimit>)
+  fn to_bytes_range<R>(&self, range: R) -> (Bound<BoundLimit>, Bound<BoundLimit>)
   where
     R: RangeBounds<u64>,
   {
     let uuid_bytes = self.uuid.as_ref().map(|u| &u.as_bytes()[..]);
     let start = match range.start_bound() {
-      Bound::Excluded(score) => {
-        // Increment one to exclude the start range
-        // TODO Analyze edge case when score is u64::MAX. Such case should
-        // return an empty interator
-        Self::create_bound_value(uuid_bytes, &score.saturating_add(1))
-      }
-      Bound::Included(score) => {
-        // Included bound
-        Self::create_bound_value(uuid_bytes, score)
-      }
+      Bound::Excluded(score) => Bound::Excluded(Self::create_bound_value(uuid_bytes, score)),
+      Bound::Included(score) => Bound::Included(Self::create_bound_value(uuid_bytes, score)),
       Bound::Unbounded => {
-        // Unbounded start has zeroed score
-        Self::create_bound_value(uuid_bytes, &u64::MIN)
+        // An unbounded start does not begin from the first skiplist element
+        // but at the beginning of its minimum score
+        Bound::Included(Self::create_bound_value(uuid_bytes, &u64::MIN))
       }
     };
 
     let end = match range.end_bound() {
-      Bound::Excluded(score) => {
-        let bound = Self::create_bound_value(uuid_bytes, score);
-        Bound::Excluded(bound)
-      }
-      Bound::Included(score) => {
-        let bound = Self::create_bound_value(uuid_bytes, score);
-        Bound::Included(bound)
-      }
+      Bound::Excluded(score) => Bound::Excluded(Self::create_bound_value(uuid_bytes, score)),
+      Bound::Included(score) => Bound::Included(Self::create_bound_value(uuid_bytes, score)),
       Bound::Unbounded => self.create_unbounded_bound(),
     };
 
@@ -210,7 +201,7 @@ impl SortedSet {
     }
 
     // However, if the UUID overflows, we reached the maximum UUID. Only
-    // such case means an iteration until the database end. Unlikely, yes;
+    // such case means an iteration until the database's end. Unlikely, yes;
     // but theoretically possible
     Bound::Unbounded
   }
