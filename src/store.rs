@@ -57,11 +57,25 @@ impl<D> Store<D> {
   }
 
   /// Remove key from the database.
-  pub fn delete<K>(&self, txn: &mut RwTransaction, key: K) -> Result<()>
+  pub fn remove<K>(&self, txn: &mut RwTransaction, key: K) -> Result<()>
   where
     K: AsRef<[u8]>,
   {
     txn.del(self.database, &key.as_ref(), None)
+  }
+
+  /// Remove keys within `range` from the database.
+  pub fn remove_range<K, R>(&self, txn: &mut RwTransaction, range: R) -> Result<()>
+  where
+    K: AsRef<[u8]>,
+    R: RangeBounds<K>,
+  {
+    let mut cursor = txn.open_rw_cursor(self.database)?;
+    for _ in cursor.iter_range(range) {
+      cursor.del(WriteFlags::default())?;
+    }
+
+    Ok(())
   }
 
   /// Returns the first key and value in the Store, or None if the Store is empty.
@@ -247,6 +261,58 @@ mod tests {
     let tx = env.begin_ro_txn()?;
     assert_eq!(Ok(items.clone().into_iter().last()), store.last(&tx));
     assert_eq!(Ok(items.clone().into_iter().nth(0)), store.first(&tx));
+    Ok(())
+  }
+
+  #[test]
+  fn remove() -> Result<()> {
+    let (_tmpdir, env) = create_env()?;
+    let items: Vec<(&[u8], u16)> = vec![
+      (b"V", 500),
+      (b"W", 2000),
+      (b"X", 1000),
+      (b"Y", 10),
+      (b"Z", 100),
+    ];
+    let store = Store::open(&env, "mystore")?;
+
+    let mut tx = env.begin_rw_txn()?;
+    for (key, value) in items.iter() {
+      store.put(&mut tx, key, value)?;
+    }
+    tx.commit()?;
+
+    // Remove single element
+    let mut tx = env.begin_rw_txn()?;
+    assert_eq!(Ok(()), store.remove(&mut tx, b"W"));
+    tx.commit()?;
+
+    let tx = env.begin_ro_txn()?;
+    assert_eq!(
+      items
+        .clone()
+        .into_iter()
+        .filter(|(k, _)| { k != b"W" })
+        .collect::<Vec<_>>(),
+      store.iter(&tx)?.collect::<Result<Vec<_>>>()?
+    );
+    tx.abort();
+
+    // Remove range
+    let mut tx = env.begin_rw_txn()?;
+    assert_eq!(Ok(()), store.remove_range(&mut tx, ..&b"Z"[..]));
+    tx.commit()?;
+
+    let tx = env.begin_ro_txn()?;
+    assert_eq!(
+      items
+        .clone()
+        .into_iter()
+        .skip(4)
+        .collect::<Vec<_>>(),
+      store.iter(&tx)?.collect::<Result<Vec<_>>>()?
+    );
+    tx.abort();
     Ok(())
   }
 }
