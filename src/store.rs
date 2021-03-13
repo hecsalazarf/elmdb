@@ -96,6 +96,17 @@ impl<D> Store<D> {
     self.iter_end_backwards(txn)?.take(1).next().transpose()
   }
 
+  /// Returns `true` if the `Store` contains a value for the specified key.
+  pub fn contains_key<K, T>(&self, txn: &T, key: K) -> Result<bool>
+  where
+    K: AsRef<[u8]>,
+    T: Transaction,
+  {
+    txn
+      .get_opt(self.database, &key.as_ref())
+      .map(|opt| opt.is_some())
+  }
+
   /// Returns an iterator over the whole database.
   pub fn iter<'txn, T>(&self, txn: &'txn T) -> Result<StoreIter<'txn, D>>
   where
@@ -305,14 +316,22 @@ mod tests {
 
     let tx = env.begin_ro_txn()?;
     assert_eq!(
-      items
-        .clone()
-        .into_iter()
-        .skip(4)
-        .collect::<Vec<_>>(),
+      items.clone().into_iter().skip(4).collect::<Vec<_>>(),
       store.iter(&tx)?.collect::<Result<Vec<_>>>()?
     );
     tx.abort();
     Ok(())
+  }
+
+  #[test]
+  fn contains_key() -> Result<()> {
+    let (_tmpdir, env) = create_env()?;
+    let store = Store::open(&env, "mystore")?;
+    let mut txn = env.begin_rw_txn()?;
+
+    assert_eq!(Ok(false), store.contains_key(&txn, "key1"));
+    store.put(&mut txn, "key1", &"value1")?;
+    assert_eq!(Ok(true), store.contains_key(&txn, "key1"));
+    txn.commit()
   }
 }
