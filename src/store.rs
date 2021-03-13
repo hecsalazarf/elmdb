@@ -147,7 +147,7 @@ impl<D> Store<D> {
   }
 }
 
-/// Iterator over key/data pairs of a store.
+/// Iterator over key/data pairs of a `Store`.
 pub struct StoreIter<'txn, D> {
   inner: Iter<'txn>,
   _data: PhantomData<D>,
@@ -173,6 +173,16 @@ impl<'txn, D> StoreIter<'txn, D> {
       Err(e) => Some(Err(e)),
     })
   }
+
+  /// Iterate over the values of this `Store`.
+  pub fn values(self) -> StoreValues<'txn, D> {
+    StoreValues::new(self)
+  }
+
+  /// Iterate over the keys of this `Store`.
+  pub fn keys(self) -> StoreKeys<'txn, D> {
+    StoreKeys::new(self)
+  }
 }
 
 impl<'txn, D: Deserialize<'txn>> Iterator for StoreIter<'txn, D> {
@@ -180,6 +190,44 @@ impl<'txn, D: Deserialize<'txn>> Iterator for StoreIter<'txn, D> {
 
   fn next(&mut self) -> Option<Self::Item> {
     self.next_inner()
+  }
+}
+
+/// An iterator that iterates the values of a `Store`.
+pub struct StoreValues<'txn, D> {
+  inner: StoreIter<'txn, D>,
+}
+
+impl<'txn, D> StoreValues<'txn, D> {
+  fn new(inner: StoreIter<'txn, D>) -> Self {
+    Self { inner }
+  }
+}
+
+impl<'txn, D: Deserialize<'txn>> Iterator for StoreValues<'txn, D> {
+  type Item = Result<D>;
+
+  fn next(&mut self) -> Option<Self::Item> {
+    self.inner.next().map(|res| res.map(|(_, v)| v))
+  }
+}
+
+/// An iterator that iterates the keys of a `Store`.
+pub struct StoreKeys<'txn, D> {
+  inner: StoreIter<'txn, D>,
+}
+
+impl<'txn, D> StoreKeys<'txn, D> {
+  fn new(inner: StoreIter<'txn, D>) -> Self {
+    Self { inner }
+  }
+}
+
+impl<'txn, D: Deserialize<'txn>> Iterator for StoreKeys<'txn, D> {
+  type Item = Result<&'txn [u8]>;
+
+  fn next(&mut self) -> Option<Self::Item> {
+    self.inner.next().map(|res| res.map(|(k, _)| k))
   }
 }
 
@@ -213,16 +261,19 @@ mod tests {
     let tx = env.begin_ro_txn()?;
     assert_eq!(items.clone(), store.iter(&tx)?.collect::<Result<Vec<_>>>()?);
 
+    // Iterator from
     assert_eq!(
       items.clone().into_iter().skip(1).collect::<Vec<_>>(),
       store.iter_from(&tx, b"2")?.collect::<Result<Vec<_>>>()?
     );
 
+    // Backwards iterator
     assert_eq!(
       items.clone().into_iter().rev().collect::<Vec<_>>(),
       store.iter_end_backwards(&tx)?.collect::<Result<Vec<_>>>()?
     );
 
+    // Range iterator
     assert_eq!(
       items
         .clone()
@@ -234,6 +285,33 @@ mod tests {
         .range(&tx, &b"2"[..]..=b"3")?
         .collect::<Result<Vec<_>>>()?
     );
+
+    // Values iterator
+    assert_eq!(
+      items
+        .clone()
+        .into_iter()
+        .map(|(_, v)| v)
+        .collect::<Vec<_>>(),
+      store
+        .iter(&tx)?
+        .values()
+        .collect::<Result<Vec<_>>>()?
+    );
+
+    // Keys iterator
+    assert_eq!(
+      items
+        .clone()
+        .into_iter()
+        .map(|(k, _)| k)
+        .collect::<Vec<_>>(),
+      store
+        .iter(&tx)?
+        .keys()
+        .collect::<Result<Vec<_>>>()?
+    );
+
     Ok(())
   }
 
