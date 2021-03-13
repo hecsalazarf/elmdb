@@ -71,7 +71,8 @@ impl<D> Store<D> {
     R: RangeBounds<K>,
   {
     let mut cursor = txn.open_rw_cursor(self.database)?;
-    for _ in cursor.iter_range(range) {
+    for res in cursor.iter_range(range) {
+      res?;
       cursor.del(WriteFlags::default())?;
     }
 
