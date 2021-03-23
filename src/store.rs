@@ -3,7 +3,7 @@ use lmdb::{
   Cursor, Database, Environment, Error, Iter, Result, RwTransaction, Transaction, WriteFlags,
 };
 use serde::{Deserialize, Serialize};
-use std::{marker::PhantomData, ops::RangeBounds};
+use std::{borrow::Borrow, marker::PhantomData, ops::RangeBounds};
 
 /// A typed key-value LMDB database.
 #[derive(Copy, Clone, Debug)]
@@ -34,12 +34,18 @@ impl<D> Store<D> {
   }
 
   /// Insert data with key. Data can be any type that implements `serde:Serialize`.
-  pub fn put<K>(&self, txn: &mut RwTransaction, key: K, data: &D) -> Result<()>
+  pub fn put<K, V: ?Sized>(&self, txn: &mut RwTransaction, key: K, value: &V) -> Result<()>
   where
     K: AsRef<[u8]>,
-    D: Serialize,
+    D: Borrow<V>,
+    V: Serialize
   {
-    txn.put_data(self.database, &key.as_ref(), &data, WriteFlags::default())
+    txn.put_data(
+      self.database,
+      &key.as_ref(),
+      value,
+      WriteFlags::default(),
+    )
   }
 
   /// Retrieve data from `Store` if keys exists.
@@ -242,8 +248,8 @@ mod tests {
     let (_tmpdir, env) = create_env()?;
     let store = Store::open(&env, "mystore")?;
     let mut tx = env.begin_rw_txn()?;
-    store.put(&mut tx, "hello", &"world")?;
-    assert_eq!(Ok(Some("world")), store.get(&mut tx, "hello"));
+    store.put(&mut tx, "hello", "world")?;
+    assert_eq!(Ok(Some("world".to_owned())), store.get(&mut tx, "hello"));
 
     Ok(())
   }
@@ -294,10 +300,7 @@ mod tests {
         .into_iter()
         .map(|(_, v)| v)
         .collect::<Vec<_>>(),
-      store
-        .iter(&tx)?
-        .values()
-        .collect::<Result<Vec<_>>>()?
+      store.iter(&tx)?.values().collect::<Result<Vec<_>>>()?
     );
 
     // Keys iterator
@@ -307,10 +310,7 @@ mod tests {
         .into_iter()
         .map(|(k, _)| k)
         .collect::<Vec<_>>(),
-      store
-        .iter(&tx)?
-        .keys()
-        .collect::<Result<Vec<_>>>()?
+      store.iter(&tx)?.keys().collect::<Result<Vec<_>>>()?
     );
 
     Ok(())
@@ -319,7 +319,7 @@ mod tests {
   #[test]
   fn get_incompatible() -> Result<()> {
     let (_tmpdir, env) = create_env()?;
-    let store = Store::open(&env, "mystore")?;
+    let store: Store<bool> = Store::open(&env, "mystore")?;
     let mut tx = env.begin_rw_txn()?;
     store.put(&mut tx, "true", &true)?;
     tx.commit()?;
@@ -405,11 +405,11 @@ mod tests {
   #[test]
   fn contains_key() -> Result<()> {
     let (_tmpdir, env) = create_env()?;
-    let store = Store::open(&env, "mystore")?;
+    let store: Store<String> = Store::open(&env, "mystore")?;
     let mut txn = env.begin_rw_txn()?;
 
     assert_eq!(Ok(false), store.contains_key(&txn, "key1"));
-    store.put(&mut txn, "key1", &"value1")?;
+    store.put(&mut txn, "key1", "value1")?;
     assert_eq!(Ok(true), store.contains_key(&txn, "key1"));
     txn.commit()
   }
