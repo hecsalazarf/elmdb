@@ -38,14 +38,9 @@ impl<D> Store<D> {
   where
     K: AsRef<[u8]>,
     D: Borrow<V>,
-    V: Serialize
+    V: Serialize,
   {
-    txn.put_data(
-      self.database,
-      &key.as_ref(),
-      value,
-      WriteFlags::default(),
-    )
+    txn.put_data(self.database, &key.as_ref(), value, WriteFlags::default())
   }
 
   /// Retrieve data from `Store` if keys exists.
@@ -151,6 +146,11 @@ impl<D> Store<D> {
   {
     let mut cursor = txn.open_ro_cursor(self.database)?;
     Ok(StoreIter::new(cursor.iter_end_backwards()))
+  }
+
+  /// Empties the store. All items will be removed.
+  pub fn clear(&self, txn: &mut RwTransaction) -> Result<()> {
+    txn.clear_db(self.database)
   }
 }
 
@@ -412,5 +412,24 @@ mod tests {
     store.put(&mut txn, "key1", "value1")?;
     assert_eq!(Ok(true), store.contains_key(&txn, "key1"));
     txn.commit()
+  }
+
+  #[test]
+  fn clear() -> Result<()> {
+    let (_tmpdir, env) = create_env()?;
+    let store: Store<String> = Store::open(&env, "mystore")?;
+    let mut txn = env.begin_rw_txn()?;
+    store.put(&mut txn, "key1", "value1")?;
+    store.put(&mut txn, "key2", "value2")?;
+    txn.commit()?;
+
+    let mut txn = env.begin_rw_txn()?;
+    store.clear(&mut txn)?;
+    txn.commit()?;
+
+    let txn = env.begin_ro_txn()?;
+    assert_eq!(0, store.iter(&txn)?.count());
+
+    Ok(())
   }
 }
