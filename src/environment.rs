@@ -1,6 +1,7 @@
 use crate::transaction::{RwTxn, TxnStorage};
-use lmdb::{Environment, Result};
+use lmdb::{Environment, EnvironmentBuilder, Result};
 use std::ops::Deref;
+use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 
@@ -79,6 +80,19 @@ impl EnvInner {
   }
 }
 
+/// Extension trait to for the `EnvironmentBuilder`.
+pub trait BuilderExt {
+  /// Opens a thread-safe LMDB environment aka `Env`.
+  fn open<P: AsRef<Path>>(&self, path: P) -> Result<Env>;
+}
+
+impl BuilderExt for EnvironmentBuilder {
+  fn open<P: AsRef<Path>>(&self, path: P) -> Result<Env> {
+    let environment = self.open(path.as_ref())?;
+    Env::open(environment)
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -119,5 +133,17 @@ mod tests {
     assert_eq!(Ok(&b"friend"[..]), tx1.get(db, &"hello"));
     handler.await.unwrap();
     Ok(())
+  }
+
+  #[test]
+  fn open_env() {
+    let tmp_dir = tempfile::Builder::new()
+      .prefix("lmdb")
+      .tempdir()
+      .expect("tmp dir");
+
+    let mut builder = Environment::new();
+    builder.set_max_dbs(10);
+    assert!(BuilderExt::open(&builder, tmp_dir.path()).is_ok());
   }
 }

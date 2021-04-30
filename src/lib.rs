@@ -8,7 +8,7 @@ mod transaction;
 #[cfg(test)]
 mod test_utils;
 
-pub use environment::Env;
+pub use environment::{BuilderExt, Env};
 pub use lmdb::*;
 pub use manager::Manager;
 pub use store::*;
