@@ -70,11 +70,7 @@ impl EnvInner {
   async fn begin_rw_txn<'env>(&'env self, id: Option<u128>) -> Result<RwTxn<'env>> {
     let permit = self.semaphore.acquire().await.expect("acquire permit");
     let txn = self.environment.begin_rw_txn()?;
-    let store = if id.is_some() {
-      Some(&self.txn_store)
-    } else {
-      None
-    };
+    let store = id.map(|_i| &self.txn_store);
 
     Ok(RwTxn::new(permit, txn, id, store))
   }
