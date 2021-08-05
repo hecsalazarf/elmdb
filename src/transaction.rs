@@ -154,16 +154,15 @@ impl TxnStorage {
   where
     R: std::ops::RangeBounds<u64>,
   {
-    let mut txn = txn.begin_nested_txn()?;
-    let mut iter = self.ops_set.range_by_score(&mut txn, range)?;
-    let mut count = 0;
-    while let Some(val) = iter.next().transpose()? {
-      self.ops_set.remove(&mut txn, val)?;
-      txn.del(self.ops, &val, None)?;
-      count += 1;
+    let mut ntxn = txn.begin_nested_txn()?;
+    let values = self.ops_set.remove_range_by_score(&mut ntxn, range)?;
+    ntxn.commit()?;
+    let mut ntxn = txn.begin_nested_txn()?;
+    for val in values.iter() {
+      ntxn.del(self.ops, val, None)?;
     }
-    txn.commit()?;
-    Ok(count)
+    ntxn.commit()?;
+    Ok(values.len())
   }
 }
 
@@ -331,7 +330,7 @@ mod tests {
       std::thread::sleep(std::time::Duration::from_millis(10));
     }
     txn.commit()?;
-    now += 50; // Adds 50 milliseconds
+    now += 55; // Adds 55 milliseconds
 
     let txn = env.begin_ro_txn()?;
     for i in 0..10 {
@@ -342,7 +341,7 @@ mod tests {
     txn.abort();
 
     let mut txn = env.begin_rw_txn()?;
-    assert_eq!(Ok(5), store._clean_by_range(&mut txn, 0..now));
+    assert_eq!(Ok(5), store._clean_by_range(&mut txn, 0..=now));
     txn.commit()?;
 
     let txn = env.begin_ro_txn()?;
@@ -354,8 +353,6 @@ mod tests {
         assert_eq!(Ok(Some(val)), store.retrieve(&txn, i))
       }
     }
-    txn.abort();
-
     Ok(())
   }
 }

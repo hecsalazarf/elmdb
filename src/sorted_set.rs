@@ -100,8 +100,8 @@ impl SortedSet {
   }
 
   /// Remove all elements in the sorted set stored with a score between `range`,
-  /// returning the number of elements removed.
-  pub fn remove_range_by_score<R>(&self, txn: &mut RwTransaction, range: R) -> Result<usize>
+  /// returning the elements removed.
+  pub fn remove_range_by_score<R>(&self, txn: &mut RwTransaction, range: R) -> Result<Vec<Vec<u8>>>
   where
     R: RangeBounds<u64>,
   {
@@ -112,26 +112,23 @@ impl SortedSet {
     let has_uuid = self.uuid.is_some();
 
     let mut range = SortedRange::new(cursor, start, end, has_uuid);
-    let mut removed = 0;
     let mut elements = Vec::new();
-    while let Some(key) = range.next_inner().transpose()? {
-      let encoded_element = if self.uuid.is_some() {
-        self.encode_elements_key(&key[Self::PREFIX_LEN_UUID..])
-      } else {
-        self.encode_elements_key(&key[Self::SCORE_LEN..])
-      };
+    while let Some(key) = range.next().transpose()? {
+      let encoded_element = self.encode_elements_key(key);
       range.del_current()?;
       elements.push(encoded_element);
-      removed += 1;
     }
     drop(range);
     ntxn.commit()?;
     let mut ntxn = txn.begin_nested_txn()?;
-    for el in elements {
+    for el in elements.iter_mut() {
       ntxn.del(self.elements, &el, None)?;
+      if self.uuid.is_some() {
+        el.drain(..Self::UUID_LEN);
+      }
     }
     ntxn.commit()?;
-    Ok(removed)
+    Ok(elements)
   }
 
   /// Returns the score associated with the specified element at `val` in the sorted set.
@@ -539,9 +536,9 @@ mod tests {
     set_a.add(&mut tx, 20, "Cat")?;
 
     // Remove the first two elements
-    assert_eq!(Ok(2), set_a.remove_range_by_score(&mut tx, 20..=50));
+    assert_eq!(vec!["Cat".as_bytes(), "Bear".as_bytes()], set_a.remove_range_by_score(&mut tx, 20..=50)?);
     // Remove left elements
-    assert_eq!(Ok(1), set_a.remove_range_by_score(&mut tx, ..));
+    assert_eq!(vec!["Elephant".as_bytes()], set_a.remove_range_by_score(&mut tx, ..)?);
     tx.commit()?;
 
     // Check that elements DB is empty
