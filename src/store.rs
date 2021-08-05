@@ -1,6 +1,6 @@
 use crate::transaction::{TransactionExt, TransactionRwExt};
 use lmdb::{
-  Cursor, Database, Environment, Error, Iter, Result, RwTransaction, Transaction, WriteFlags,
+  Cursor, Database, Environment, Error, Iter, Result, RwTransaction, Transaction, WriteFlags, RoCursor
 };
 use serde::{Deserialize, Serialize};
 use std::{borrow::Borrow, marker::PhantomData, ops::RangeBounds};
@@ -114,8 +114,7 @@ impl<D> Store<D> {
   where
     T: Transaction,
   {
-    let mut cursor = txn.open_ro_cursor(self.database)?;
-    Ok(StoreIter::new(cursor.iter_start()))
+    txn.open_ro_cursor(self.database).map(|cursor| StoreIter::start(cursor))
   }
 
   /// Returns an iterator positioned at first key greater than or equal to the specified key.
@@ -124,8 +123,7 @@ impl<D> Store<D> {
     K: AsRef<[u8]>,
     T: Transaction,
   {
-    let mut cursor = txn.open_ro_cursor(self.database)?;
-    Ok(StoreIter::new(cursor.iter_from(key)))
+    txn.open_ro_cursor(self.database).map(|cursor| StoreIter::from(cursor, key))
   }
 
   /// Returns an iterator over specified `range`.
@@ -135,8 +133,7 @@ impl<D> Store<D> {
     K: AsRef<[u8]>,
     R: RangeBounds<K>,
   {
-    let mut cursor = txn.open_ro_cursor(self.database)?;
-    Ok(StoreIter::new(cursor.iter_range(range)))
+    txn.open_ro_cursor(self.database).map(|cursor| StoreIter::range(cursor, range))
   }
 
   /// Returns an iterator positioned at the last key and iterating backwards.
@@ -144,8 +141,7 @@ impl<D> Store<D> {
   where
     T: Transaction,
   {
-    let mut cursor = txn.open_ro_cursor(self.database)?;
-    Ok(StoreIter::new(cursor.iter_end_backwards()))
+    txn.open_ro_cursor(self.database).map(|cursor| StoreIter::end_backwards(cursor))
   }
 
   /// Empties the store. All items will be removed.
@@ -156,14 +152,51 @@ impl<D> Store<D> {
 
 /// Iterator over key/data pairs of a `Store`.
 pub struct StoreIter<'txn, D> {
-  inner: Iter<'txn>,
+  /// Inner iterator
+  iter: Iter<'txn>,
+  /// Cursor is never read, but kept in the structure to hold the transaction
+  /// reference. Otherwise we may have invalid memory references (SIGSEGV).
+  _cursor: RoCursor<'txn>,
+  /// Type of iterator
   _data: PhantomData<D>,
 }
 
 impl<'txn, D> StoreIter<'txn, D> {
-  fn new(inner: Iter<'txn>) -> Self {
+  fn start(mut cursor: RoCursor<'txn>) -> Self {
     Self {
-      inner,
+      iter: cursor.iter_start(),
+      _cursor: cursor,
+      _data: PhantomData,
+    }
+  }
+
+  fn from<K>(mut cursor: RoCursor<'txn>, key: K) -> Self
+  where
+    K: AsRef<[u8]>,
+  {
+    Self {
+      iter: cursor.iter_from(key),
+      _cursor: cursor,
+      _data: PhantomData,
+    }
+  }
+
+  fn range<K, R>(mut cursor: RoCursor<'txn>, range: R) -> Self
+  where
+    K: AsRef<[u8]>,
+    R: RangeBounds<K>,
+  {
+    Self {
+      iter: cursor.iter_range(range),
+      _cursor: cursor,
+      _data: PhantomData,
+    }
+  }
+
+  fn end_backwards(mut cursor: RoCursor<'txn>) -> Self {
+    Self {
+      iter: cursor.iter_end_backwards(),
+      _cursor: cursor,
       _data: PhantomData,
     }
   }
@@ -172,7 +205,7 @@ impl<'txn, D> StoreIter<'txn, D> {
   where
     D: Deserialize<'txn>,
   {
-    self.inner.next().and_then(|res| match res {
+    self.iter.next().and_then(|res| match res {
       Ok((key, val)) => {
         let v = bincode::deserialize(val);
         Some(v.map(|val| (key, val)).map_err(|_| Error::Incompatible))
@@ -259,11 +292,11 @@ mod tests {
     let (_tmpdir, env) = create_env()?;
     let store = Store::open(&env, "mystore")?;
     let items: Vec<(&[u8], u16)> = vec![(b"1", 1000), (b"2", 2000), (b"3", 3000), (b"5", 4000)];
+    let mut tx = env.begin_rw_txn()?;
     for (key, value) in items.iter() {
-      let mut tx = env.begin_rw_txn()?;
       store.put(&mut tx, key, value)?;
-      tx.commit()?;
     }
+    tx.commit()?;
 
     let tx = env.begin_ro_txn()?;
     assert_eq!(items.clone(), store.iter(&tx)?.collect::<Result<Vec<_>>>()?);
