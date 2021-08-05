@@ -1,6 +1,8 @@
 //! A sorted set with persistent storage.
 use crate::transaction::TransactionExt;
-use lmdb::{Database, Environment, Iter, Result, RwTransaction, Transaction};
+use lmdb::{
+  Cursor, Database, Environment, Iter, Result, RoCursor, RwCursor, RwTransaction, Transaction,
+};
 use std::ops::{Bound, RangeBounds};
 use uuid::Uuid;
 
@@ -62,27 +64,20 @@ impl SortedSet {
 
   /// Return all the elements in the sorted set with a score between `range`.
   /// The elements are considered to be sorted from low to high scores.
-  pub fn range_by_score<'txn, T, R>(&self, txn: &'txn T, range: R) -> Result<SortedRange<'txn>>
+  pub fn range_by_score<'txn, T, R>(
+    &self,
+    txn: &'txn T,
+    range: R,
+  ) -> Result<SortedRange<'txn, RoCursor<'txn>>>
   where
     T: Transaction,
     R: RangeBounds<u64>,
   {
-    use lmdb::Cursor;
-
     let (start, end) = self.to_bytes_range(range);
-    let mut cursor = txn.open_ro_cursor(self.skiplist)?;
-    // We use Bound::Unbounded as the upper bound in the cursor iterator
-    // because the element's value is at the end of the skiplist's key. That means
-    // a longer key than the expected bound which would lead to wrong comparisons.
-    // The upper limit is filtered within the own SortedRange implementation
-    let iter = cursor.iter_range((start, Bound::Unbounded));
+    let cursor = txn.open_ro_cursor(self.skiplist)?;
     let has_uuid = self.uuid.is_some();
 
-    Ok(SortedRange {
-      end,
-      iter,
-      has_uuid,
-    })
+    Ok(SortedRange::new(cursor, start, end, has_uuid))
   }
 
   /// Remove the specified element from the sorted set, returning `true` when
@@ -110,21 +105,32 @@ impl SortedSet {
   where
     R: RangeBounds<u64>,
   {
-    let mut txn = txn.begin_nested_txn()?;
-    let mut range = self.range_by_score(&txn, range)?;
+    let mut ntxn = txn.begin_nested_txn()?;
+
+    let (start, end) = self.to_bytes_range(range);
+    let cursor = ntxn.open_rw_cursor(self.skiplist)?;
+    let has_uuid = self.uuid.is_some();
+
+    let mut range = SortedRange::new(cursor, start, end, has_uuid);
     let mut removed = 0;
+    let mut elements = Vec::new();
     while let Some(key) = range.next_inner().transpose()? {
       let encoded_element = if self.uuid.is_some() {
         self.encode_elements_key(&key[Self::PREFIX_LEN_UUID..])
       } else {
         self.encode_elements_key(&key[Self::SCORE_LEN..])
       };
-
-      txn.del(self.skiplist, &key, None)?;
-      txn.del(self.elements, &encoded_element, None)?;
+      range.del_current()?;
+      elements.push(encoded_element);
       removed += 1;
     }
-    txn.commit()?;
+    drop(range);
+    ntxn.commit()?;
+    let mut ntxn = txn.begin_nested_txn()?;
+    for el in elements {
+      ntxn.del(self.elements, &el, None)?;
+    }
+    ntxn.commit()?;
     Ok(removed)
   }
 
@@ -245,13 +251,28 @@ impl AsRef<[u8]> for BoundLimit {
 
 /// Iterator with elements returned after calling `SortedSet::range_by_score`.
 #[derive(Debug)]
-pub struct SortedRange<'txn> {
+pub struct SortedRange<'txn, C> {
   end: Bound<BoundLimit>,
   iter: Iter<'txn>,
   has_uuid: bool,
+  cursor: C,
 }
 
-impl<'txn> SortedRange<'txn> {
+impl<'txn, C: Cursor<'txn>> SortedRange<'txn, C> {
+  fn new(mut cursor: C, start: Bound<BoundLimit>, end: Bound<BoundLimit>, has_uuid: bool) -> Self {
+    // We use Bound::Unbounded as the upper bound in the cursor iterator
+    // because the element's value is at the end of the skiplist's key. That means
+    // a longer key than the expected bound which would lead to wrong comparisons.
+    // The upper limit is filtered within the own SortedRange implementation
+    let iter = cursor.iter_range((start, Bound::Unbounded));
+    Self {
+      end,
+      iter,
+      has_uuid,
+      cursor,
+    }
+  }
+
   fn next_inner(&mut self) -> Option<Result<&'txn [u8]>> {
     let res = self.iter.next()?;
     if let Err(e) = res {
@@ -279,7 +300,14 @@ impl<'txn> SortedRange<'txn> {
   }
 }
 
-impl<'txn> Iterator for SortedRange<'txn> {
+impl<'txn> SortedRange<'txn, RwCursor<'txn>> {
+  fn del_current(&mut self) -> Result<()> {
+    let write_flags = lmdb::WriteFlags::default();
+    self.cursor.del(write_flags)
+  }
+}
+
+impl<'txn, C: Cursor<'txn>> Iterator for SortedRange<'txn, C> {
   type Item = Result<&'txn [u8]>;
 
   fn next(&mut self) -> Option<Self::Item> {
@@ -389,12 +417,14 @@ mod tests {
     assert_eq!(range.next().map(utf8_to_str), Some(Ok("Cat")));
     assert_eq!(range.next().map(utf8_to_str), Some(Ok("Bear")));
     assert_eq!(range.next().map(utf8_to_str), None);
+    drop(range);
 
     // Exclude last member
     let tx = tx.reset().renew()?;
     let mut range = set_a.range_by_score(&tx, 100..101)?;
     assert_eq!(range.next().map(utf8_to_str), Some(Ok("Elephant")));
     assert_eq!(range.next(), None);
+    drop(range);
 
     // Include last member
     let tx = tx.reset().renew()?;
@@ -435,6 +465,7 @@ mod tests {
     assert_eq!(range.next().map(utf8_to_str), Some(Ok("Bear")));
     assert_eq!(range.next().map(utf8_to_str), Some(Ok("Elephant")));
     assert_eq!(range.next(), None);
+    drop(range);
 
     // Set B upper limit is the end of database
     let tx = tx.reset().renew()?;
@@ -515,12 +546,16 @@ mod tests {
 
     // Check that elements DB is empty
     let tx = env.begin_ro_txn().expect("ro txn");
-    let mut iter = tx.open_ro_cursor(set_a.elements)?.iter_start();
+    // Always keep the cursor reference in order to avoid SIGSEGV errors
+    let mut cursor = tx.open_ro_cursor(set_a.elements)?;
+    let mut iter = cursor.iter_start();
     assert_eq!(None, iter.next());
+    drop(cursor);
 
     // Check that skiplist DB is empty
     let tx = tx.reset().renew()?;
-    let mut iter = tx.open_ro_cursor(set_a.skiplist)?.iter_start();
+    let mut cursor = tx.open_ro_cursor(set_a.skiplist)?;
+    let mut iter = cursor.iter_start();
     assert_eq!(None, iter.next());
     Ok(())
   }
