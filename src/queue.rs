@@ -174,7 +174,7 @@ impl Queue {
     key
   }
 
-  pub fn iter_from_cursor<'txn, C>(&self, cursor: &mut C) -> QueueIter<'txn, '_>
+  fn iter_from_cursor<'txn, C>(&self, cursor: &mut C) -> QueueIter<'txn, '_>
   where
     C: Cursor<'txn>,
   {
