@@ -1,7 +1,7 @@
 [package]
-name = "embed"
+name = "elmdb"
 version = "0.1.0"
-description = "Embedded dictionary based on lmdb"
+description = "Extended features for LMDB"
 authors = ["Hector Salazar <hecsalazarf@outlook.com>"]
 edition = "2018"
 
