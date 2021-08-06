@@ -179,10 +179,10 @@ impl Queue {
   where
     C: Cursor<'txn>,
   {
-    let inner = cursor.iter_from(self.uuid.as_bytes());
+    let iter = cursor.iter_from(self.uuid.as_bytes());
     QueueIter {
       cursor,
-      inner,
+      iter,
       uuid: &self.uuid,
     }
   }
@@ -191,26 +191,23 @@ impl Queue {
 /// Iterator on queue's elements.
 pub struct QueueIter<'txn, 'q, C> {
   cursor: C,
-  inner: Iter<'txn>,
+  iter: Iter<'txn>,
   uuid: &'q Uuid,
 }
 
 impl<'txn, C: Cursor<'txn>> QueueIter<'txn, '_, C> {
   fn next_inner(&mut self) -> Option<Result<(&'txn [u8], &'txn [u8])>> {
-    let next = self.inner.next();
-    if let Some(Ok((key, _))) = next {
-      // Extract the uuid and compare it, so that we know we are still
-      // on the same queue
-      let uuid_bytes = self.uuid.as_bytes();
-      if &key[..uuid_bytes.len()] == uuid_bytes {
-        next
-      } else {
-        // Different uuid, iterator is over
-        None
+    self.iter.next().filter(|res| {
+      match res {
+        Ok((key, _)) => {
+          // Extract the uuid and compare it, so that we know we are still
+          // on the same queue
+          let uuid_bytes = self.uuid.as_bytes();
+          &key[..uuid_bytes.len()] == uuid_bytes
+        }
+        Err(_) => true,
       }
-    } else {
-      next
-    }
+    })
   }
 }
 
