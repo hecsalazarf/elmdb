@@ -73,11 +73,11 @@ impl SortedSet {
     T: Transaction,
     R: RangeBounds<u64>,
   {
-    let (start, end) = self.to_bytes_range(range);
+    let brange = self.to_bytes_range(range);
     let cursor = txn.open_ro_cursor(self.skiplist)?;
     let has_uuid = self.uuid.is_some();
 
-    Ok(RangeIter::new(cursor, start, end, has_uuid))
+    Ok(RangeIter::new(cursor, brange, has_uuid))
   }
 
   /// Remove the specified element from the sorted set, returning `true` when
@@ -107,11 +107,11 @@ impl SortedSet {
   {
     let mut ntxn = txn.begin_nested_txn()?;
 
-    let (start, end) = self.to_bytes_range(range);
+    let brange = self.to_bytes_range(range);
     let cursor = ntxn.open_rw_cursor(self.skiplist)?;
     let has_uuid = self.uuid.is_some();
 
-    let mut range = RangeIter::new(cursor, start, end, has_uuid);
+    let mut range = RangeIter::new(cursor, brange, has_uuid);
     let mut elements = Vec::new();
     while let Some(key) = range.next().transpose()? {
       let encoded_element = self.encode_elements_key(key);
@@ -168,7 +168,7 @@ impl SortedSet {
       .unwrap_or(Vec::new())
   }
 
-  fn to_bytes_range<R>(&self, range: R) -> (Bound<BoundLimit>, Bound<BoundLimit>)
+  fn to_bytes_range<R>(&self, range: R) -> BytesRange
   where
     R: RangeBounds<u64>,
   {
@@ -256,14 +256,14 @@ pub struct RangeIter<'txn, C> {
 }
 
 impl<'txn, C: Cursor<'txn>> RangeIter<'txn, C> {
-  fn new(mut cursor: C, start: Bound<BoundLimit>, end: Bound<BoundLimit>, has_uuid: bool) -> Self {
+  fn new(mut cursor: C, range: BytesRange, has_uuid: bool) -> Self {
     // We use Bound::Unbounded as the upper bound in the cursor iterator
     // because the element's value is at the end of the skiplist's key. That means
     // a longer key than the expected bound which would lead to wrong comparisons.
     // The upper limit is filtered within the own RangeIter implementation
-    let iter = cursor.iter_range((start, Bound::Unbounded));
+    let iter = cursor.iter_range((range.0, Bound::Unbounded));
     Self {
-      end,
+      end: range.1,
       iter,
       has_uuid,
       cursor,
@@ -369,6 +369,9 @@ impl SortedSetDb {
     Ok((skiplist, elements))
   }
 }
+
+/// Inner representation in bytes of the bounds of a `RangeIter`
+type BytesRange = (Bound<BoundLimit>, Bound<BoundLimit>);
 
 #[cfg(test)]
 mod tests {
@@ -536,9 +539,15 @@ mod tests {
     set_a.add(&mut tx, 20, "Cat")?;
 
     // Remove the first two elements
-    assert_eq!(vec!["Cat".as_bytes(), "Bear".as_bytes()], set_a.remove_range_by_score(&mut tx, 20..=50)?);
+    assert_eq!(
+      vec!["Cat".as_bytes(), "Bear".as_bytes()],
+      set_a.remove_range_by_score(&mut tx, 20..=50)?
+    );
     // Remove left elements
-    assert_eq!(vec!["Elephant".as_bytes()], set_a.remove_range_by_score(&mut tx, ..)?);
+    assert_eq!(
+      vec!["Elephant".as_bytes()],
+      set_a.remove_range_by_score(&mut tx, ..)?
+    );
     tx.commit()?;
 
     // Check that elements DB is empty
