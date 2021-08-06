@@ -68,7 +68,7 @@ impl SortedSet {
     &self,
     txn: &'txn T,
     range: R,
-  ) -> Result<SortedRange<'txn, RoCursor<'txn>>>
+  ) -> Result<RangeIter<'txn, RoCursor<'txn>>>
   where
     T: Transaction,
     R: RangeBounds<u64>,
@@ -77,7 +77,7 @@ impl SortedSet {
     let cursor = txn.open_ro_cursor(self.skiplist)?;
     let has_uuid = self.uuid.is_some();
 
-    Ok(SortedRange::new(cursor, start, end, has_uuid))
+    Ok(RangeIter::new(cursor, start, end, has_uuid))
   }
 
   /// Remove the specified element from the sorted set, returning `true` when
@@ -111,7 +111,7 @@ impl SortedSet {
     let cursor = ntxn.open_rw_cursor(self.skiplist)?;
     let has_uuid = self.uuid.is_some();
 
-    let mut range = SortedRange::new(cursor, start, end, has_uuid);
+    let mut range = RangeIter::new(cursor, start, end, has_uuid);
     let mut elements = Vec::new();
     while let Some(key) = range.next().transpose()? {
       let encoded_element = self.encode_elements_key(key);
@@ -248,19 +248,19 @@ impl AsRef<[u8]> for BoundLimit {
 
 /// Iterator with elements returned after calling `SortedSet::range_by_score`.
 #[derive(Debug)]
-pub struct SortedRange<'txn, C> {
+pub struct RangeIter<'txn, C> {
   end: Bound<BoundLimit>,
   iter: Iter<'txn>,
   has_uuid: bool,
   cursor: C,
 }
 
-impl<'txn, C: Cursor<'txn>> SortedRange<'txn, C> {
+impl<'txn, C: Cursor<'txn>> RangeIter<'txn, C> {
   fn new(mut cursor: C, start: Bound<BoundLimit>, end: Bound<BoundLimit>, has_uuid: bool) -> Self {
     // We use Bound::Unbounded as the upper bound in the cursor iterator
     // because the element's value is at the end of the skiplist's key. That means
     // a longer key than the expected bound which would lead to wrong comparisons.
-    // The upper limit is filtered within the own SortedRange implementation
+    // The upper limit is filtered within the own RangeIter implementation
     let iter = cursor.iter_range((start, Bound::Unbounded));
     Self {
       end,
@@ -297,14 +297,14 @@ impl<'txn, C: Cursor<'txn>> SortedRange<'txn, C> {
   }
 }
 
-impl<'txn> SortedRange<'txn, RwCursor<'txn>> {
+impl<'txn> RangeIter<'txn, RwCursor<'txn>> {
   fn del_current(&mut self) -> Result<()> {
     let write_flags = lmdb::WriteFlags::default();
     self.cursor.del(write_flags)
   }
 }
 
-impl<'txn, C: Cursor<'txn>> Iterator for SortedRange<'txn, C> {
+impl<'txn, C: Cursor<'txn>> Iterator for RangeIter<'txn, C> {
   type Item = Result<&'txn [u8]>;
 
   fn next(&mut self) -> Option<Self::Item> {
