@@ -1,7 +1,8 @@
 //! A queue with persitent storage.
 use crate::transaction::{TransactionExt, TransactionRwExt};
 use lmdb::{
-  Cursor, Database, Environment, Error, Iter, Result, RwTransaction, Transaction, WriteFlags,
+  Cursor, Database, Environment, Error, Iter, Result, RoCursor, RwCursor, RwTransaction,
+  Transaction, WriteFlags,
 };
 use uuid::Uuid;
 
@@ -75,19 +76,20 @@ impl Queue {
   }
 
   /// Pop one element from the queue's head. Return `None` if queue is empty.
-  pub fn pop<'txn>(&self, txn: &'txn mut RwTransaction) -> Result<Option<&'txn [u8]>> {
+  pub fn pop<'txn>(&self, txn: &'txn mut RwTransaction) -> Result<Option<Vec<u8>>> {
     let mut txn = txn.begin_nested_txn()?;
-    let mut cursor = txn.open_rw_cursor(self.elements)?;
-    let iter = self.iter_from_cursor(&mut cursor);
-    let opt_pop = iter.take(1).next().transpose()?;
+    let cursor = txn.open_rw_cursor(self.elements)?;
+    let mut iter = self.iter_from_cursor(cursor);
+    let opt_pop = iter.by_ref().take(1).next().transpose()?;
 
     if opt_pop.is_some() {
-      let write_flags = WriteFlags::default();
-      cursor.del(write_flags)?;
+      iter.del_current()?;
     }
-    drop(cursor);
+    // Rust does not allow to pass txn as mutable twice when holding the reference, so the value
+    // is copied
+    let opt_pop = opt_pop.map(|o| o.to_vec());
+    drop(iter);
     txn.commit()?;
-
     Ok(opt_pop)
   }
 
@@ -97,30 +99,32 @@ impl Queue {
     V: AsRef<[u8]>,
   {
     let mut txn = txn.begin_nested_txn()?;
-    let mut iter = self.iter(&txn)?;
+    let cursor = txn.open_rw_cursor(self.elements)?;
+    let mut iter = self.iter_from_cursor(cursor);
+
     let val = val.as_ref();
     let mut removed = 0;
-
-    while let Some((key, value)) = iter.next_inner().transpose()? {
+    while let Some((_key, value)) = iter.next_inner().transpose()? {
       if val == value {
-        txn.del(self.elements, &key, None)?;
+        iter.del_current()?;
         removed += 1;
         if removed == count {
           break;
         }
       }
     }
+    drop(iter);
     txn.commit()?;
     Ok(removed)
   }
 
   /// Create an iterator over the elements of the queue.
-  pub fn iter<'txn, T>(&self, txn: &'txn T) -> Result<QueueIter<'txn, '_>>
+  pub fn iter<'txn, T>(&self, txn: &'txn T) -> Result<QueueIter<'txn, '_, RoCursor<'txn>>>
   where
     T: Transaction,
   {
-    let mut cursor = txn.open_ro_cursor(self.elements)?;
-    let iter = self.iter_from_cursor(&mut cursor);
+    let cursor = txn.open_ro_cursor(self.elements)?;
+    let iter = self.iter_from_cursor(cursor);
     Ok(iter)
   }
 
@@ -130,8 +134,8 @@ impl Queue {
   where
     T: Transaction,
   {
-    let mut cursor = txn.open_ro_cursor(self.elements)?;
-    let iter = self.iter_from_cursor(&mut cursor);
+    let cursor = txn.open_ro_cursor(self.elements)?;
+    let iter = self.iter_from_cursor(cursor);
     iter.skip(index).take(1).next().transpose()
   }
 
@@ -142,15 +146,12 @@ impl Queue {
     txn: &'txn mut RwTransaction,
     dest: &Self,
   ) -> Result<Option<Vec<u8>>> {
-    if let Some(elm) = self.pop(txn)? {
-      // Hate to copy, but rust does not allow to pass txn as mutable twice
-      // when holding the reference to elm.
-      let copy = elm.to_vec();
-      dest.push(txn, &copy)?;
-      return Ok(Some(copy));
-    }
-
-    Ok(None)
+    self.pop(txn).and_then(|opt| {
+      if let Some(ref elm) = opt {
+        dest.push(txn, elm)?;
+      }
+      Ok(opt)
+    })
   }
 
   /// Create a new subscriber that listens to events on this queue.
@@ -174,24 +175,27 @@ impl Queue {
     key
   }
 
-  fn iter_from_cursor<'txn, C>(&self, cursor: &mut C) -> QueueIter<'txn, '_>
+  fn iter_from_cursor<'txn, C>(&self, mut cursor: C) -> QueueIter<'txn, '_, C>
   where
     C: Cursor<'txn>,
   {
+    let inner = cursor.iter_from(self.uuid.as_bytes());
     QueueIter {
-      inner: cursor.iter_from(self.uuid.as_bytes()),
+      cursor,
+      inner,
       uuid: &self.uuid,
     }
   }
 }
 
 /// Iterator on queue's elements.
-pub struct QueueIter<'txn, 'q> {
+pub struct QueueIter<'txn, 'q, C> {
+  cursor: C,
   inner: Iter<'txn>,
   uuid: &'q Uuid,
 }
 
-impl<'txn> QueueIter<'txn, '_> {
+impl<'txn, C: Cursor<'txn>> QueueIter<'txn, '_, C> {
   fn next_inner(&mut self) -> Option<Result<(&'txn [u8], &'txn [u8])>> {
     let next = self.inner.next();
     if let Some(Ok((key, _))) = next {
@@ -210,7 +214,14 @@ impl<'txn> QueueIter<'txn, '_> {
   }
 }
 
-impl<'txn> Iterator for QueueIter<'txn, '_> {
+impl<'txn> QueueIter<'txn, '_, RwCursor<'txn>> {
+  fn del_current(&mut self) -> Result<()> {
+    let write_flags = WriteFlags::default();
+    self.cursor.del(write_flags)
+  }
+}
+
+impl<'txn, C: Cursor<'txn>> Iterator for QueueIter<'txn, '_, C> {
   type Item = Result<&'txn [u8]>;
 
   fn next(&mut self) -> Option<Self::Item> {
@@ -405,7 +416,8 @@ mod tests {
     assert_eq!(Some(Ok("Z")), iter.next().map(utf8_to_str));
     assert_eq!(Some(Ok("X")), iter.next().map(utf8_to_str));
     assert_eq!(None, iter.next().map(utf8_to_str));
-    tx.commit()?;
+    drop(iter);
+    tx.abort();
 
     let mut tx = env.begin_rw_txn()?;
     queue_2.push(&mut tx, "A")?;
@@ -415,7 +427,7 @@ mod tests {
     let mut iter = queue_2.iter(&tx)?;
     assert_eq!(Some(Ok("A")), iter.next().map(utf8_to_str));
     assert_eq!(None, iter.next().map(utf8_to_str));
-    tx.commit()
+    Ok(())
   }
 
   #[test]
@@ -454,13 +466,9 @@ mod tests {
     queue_1.push(&mut tx, "Z")?;
     queue_2.push(&mut tx, "A")?;
 
-    let opt_pop = queue_1.pop(&mut tx).transpose();
-    assert_eq!(Some(Ok("Y")), opt_pop.map(utf8_to_str));
-    let opt_pop = queue_1.pop(&mut tx).transpose();
-    assert_eq!(Some(Ok("Z")), opt_pop.map(utf8_to_str));
-
-    let opt_pop = queue_1.pop(&mut tx).transpose();
-    assert_eq!(None, opt_pop.map(utf8_to_str));
+    assert_eq!(Ok(Some("Y".to_owned().into_bytes())), queue_1.pop(&mut tx));
+    assert_eq!(Ok(Some("Z".to_owned().into_bytes())), queue_1.pop(&mut tx));
+    assert_eq!(Ok(None), queue_1.pop(&mut tx));
     tx.commit()
   }
 
