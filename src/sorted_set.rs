@@ -537,6 +537,7 @@ mod tests {
     set_a.add(&mut tx, 100, "Elephant")?;
     set_a.add(&mut tx, 50, "Bear")?;
     set_a.add(&mut tx, 20, "Cat")?;
+    set_a.add(&mut tx, 5, "Mouse")?;
 
     // Remove the first two elements
     assert_eq!(
@@ -545,7 +546,7 @@ mod tests {
     );
     // Remove left elements
     assert_eq!(
-      vec!["Elephant".as_bytes()],
+      vec!["Mouse".as_bytes(), "Elephant".as_bytes()],
       set_a.remove_range_by_score(&mut tx, ..)?
     );
     tx.commit()?;
