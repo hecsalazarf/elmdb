@@ -16,6 +16,6 @@ pub use transaction::{RwTxn, TransactionExt, TransactionRwExt};
 
 /// Collections implemented on top of LMDB B+ Trees.
 pub mod collections {
-  pub use super::queue::*;
-  pub use super::sorted_set::*;
+    pub use super::queue::*;
+    pub use super::sorted_set::*;
 }
